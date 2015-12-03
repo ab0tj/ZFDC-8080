@@ -13,7 +13,9 @@ zfdc_data_port		equ 010h
 zfdc_stat_port		equ 011h
 zfdc_reset_port		equ 013h
 
+cmd_reset_zfdc		equ 03h
 cmd_set_format		equ 04h
+cmd_set_home		equ 0ah
 cmd_handshake		equ 021h
 cmd_format_disk		equ 016h
 cmd_confirm_fmt		equ 032h
@@ -83,12 +85,16 @@ track_done:
 
 	mov a,b
 	cpi end_track		; are we at the last track?
-	jnz format_done
+	jz format_done
 	inr b			; increment track number
 	jmp next_track
 	
 format_done:
-	mvi a,0
+	mvi c,cmd_set_home
+	call s100out
+	call wait_for_ack
+	out zfdc_reset_port
+	mvi a,0ffh
 	out 0ffh		; show no error
 	hlt			; nowhere to return to, so we'll halt
 
