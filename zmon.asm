@@ -1,3 +1,4 @@
+
 ; 8080 monitor for ZFDC and IMSAI SIO
 
 .hexfile zmon.hex
@@ -5,11 +6,11 @@
 .download bin
 .org 0h ; 0 for testing, change to 0C000h before burning to rom
 
-stack   equ 0BFFFh      ; stack pointer, just below rom
+stack   equ 0BFF0h ; stack pointer, just below rom and some temp space
 
 ; i/o ports
-uart_data               equ 01h         ; sio data port (2)
-uart_ctl                equ 00h         ; sio control port (3)
+uart_data               equ 01h         ; uart data port, emu=1 sio=2
+uart_ctl                equ 00h         ; uart control port, emu=0 sio=3
 uart_reset              equ 040h        ; reset byte
 uart_mode               equ 04Eh        ; mode byte
 uart_cmd_byte           equ 027h        ; control byte
@@ -20,9 +21,17 @@ zfdc_reset_port         equ 013h
 ;zfdc commands
 zcmd_reset              equ 03h
 zcmd_set_format         equ 04h
-zcmd_set_home           equ 0ah
-zcmd_handshake          equ 021h
+zcmd_set_drive          equ 05h
+zcmd_set_track		equ 07h
+zcmd_set_side		equ 08h
+zcmd_set_sector		equ 09h
+zcmd_set_home           equ 0Ah
+zcmd_seek_nv		equ 0Dh
+zcmd_read_sector	equ 10h
+zcmd_write_sector	equ 11h
 zcmd_format_disk        equ 016h
+zcmd_handshake          equ 021h
+zcmd_get_sec_size	equ 025h
 zcmd_confirm_fmt        equ 032h
 
 ;flags
@@ -36,6 +45,7 @@ zfdc_out_rdy    equ 02h
 zfdc_in_rdy     equ 01h
 
 ; ascii
+BS equ 08h
 CR equ 0Dh
 LF equ 0Ah
 SPC equ 020h
@@ -49,7 +59,7 @@ CtrlZ equ 01Ah
 ; initialize hardware, show signon message
 
 ; init uart
-        mvi a, 0                ; send dummy mode and command to uart
+        mvi a, 0              ; send dummy mode and command to uart
         out uart_ctl
         out uart_ctl
         out uart_ctl
@@ -74,7 +84,7 @@ wait_d:                         ; delay for ~0.5 sec
         jnz wait_d
 
         in zfdc_data_port       ; make sure board exists
-        cpi zcmd_handshake      ; make sure we get the handshake byte
+        cpi zcmd_handshake    ; make sure we get the handshake byte
         jnz zfdc_init_error
 
         mvi a, zcmd_handshake   ; clear any zfdc ints
@@ -88,7 +98,7 @@ wait_d:                         ; delay for ~0.5 sec
 init_set_fmt:                   ; set format for each drive
         mvi c, zcmd_set_format  ; send set format command
         call zfdc_out
-        mov c, e                ; tell the board which drive we want
+        mov c, e               ; tell the board which drive we want
         call zfdc_out
         mov c, m                ; get format number
         call zfdc_out
@@ -103,6 +113,7 @@ init_set_fmt:                   ; set format for each drive
 
 zfdc_init_error:
         call zfdc_error
+	call uart_out_crlf
 
 zfdc_init_done:
         lxi h, signon_str       ; show signon
@@ -110,8 +121,9 @@ zfdc_init_done:
         in uart_data            ; clear rx buffer
 
 prompt:
+	lxi sp, stack	; just in case there should have been a ret
         lxi h, prompt_str
-	call uart_out_str
+        call uart_out_str
         call uart_in
         mov c, a
         push a
@@ -119,9 +131,9 @@ prompt:
         call uart_out_crlf
 
         pop a
-        cpi 'i'                 ; input into memory
+        cpi 'm'                 ; modify memory
         jz memin
-        cpi 'o'                 ; output from memory
+        cpi 'd'                 ; dump memory
         jz memout
         cpi 'j'                 ; jump to memory address
         jz jump
@@ -133,6 +145,10 @@ prompt:
         jz diskwrite
         cpi 'f'                 ; format floppy track(s)
         jz diskfmt
+	cpi 'i'			; input from i/o
+	jz portin
+	cpi 'o'			; output to i/o
+	jz portout
 
         mvi c, '?'
         call uart_out
@@ -155,100 +171,100 @@ memin_raw:
         lxi h, start_str
         call uart_out_str       ; "start:"
         call uart_in_hexaddr
-	call uart_out_crlf
+        call uart_out_crlf
 
-	mov a, l
-	ani 0fh			; calculate offset
-	mov b, a
-	mov a, l
-	ani 0f0h		; round down
-	mov l, a
+        mov a, l
+        ani 0fh                 ; calculate offset
+        mov b, a
+        mov a, l
+        ani 0f0h                ; round down
+        mov l, a
 
-	call uart_out_mempos
+        call uart_out_mempos
 memin_raw_1:
-	mov a, l
-	ani 0fh
-	cmp b			; end of offset?
-	jz memin_raw_2
-	mvi c, ' '
-	call uart_out
-	mov d, m
-	call uart_out_hex
-	inx h
-	jmp memin_raw_1
+        mov a, l
+        ani 0fh
+        cmp b                   ; end of offset?
+        jz memin_raw_2
+        mvi c, ' '
+        call uart_out
+        mov d, m
+        call uart_out_hex
+        inx h
+        jmp memin_raw_1
 
 memin_raw_2:
-	mvi c, ' '
-	call uart_out
-	call uart_in_hex
-	mov m, a
-	inx h
-	inr b
+        mvi c, ' '
+        call uart_out
+        call uart_in_hex
+        mov m, a
+        inx h
+        inr b
 
-	mov a, b
-	cpi 010h		; end of line?
-	jnz memin_raw_2		; nope
+        mov a, b
+        cpi 010h                ; end of line?
+        jnz memin_raw_2         ; nope
 
-	call uart_out_crlf
-	call uart_out_mempos
-	mvi b, 0
-	jmp memin_raw_2
-	
+        call uart_out_crlf
+        call uart_out_mempos
+        mvi b, 0
+        jmp memin_raw_2
+
 memin_intel:
-	call uart_out_crlf
+        call uart_out_crlf
 memin_intel_start:
         call uart_in
-	cpi ':'			; start code
-	jz memin_intel_1
-	cpi CtrlZ		; bail
-	jz prompt
-	jmp memin_intel_start
+        cpi ':'                 ; start code
+        jz memin_intel_1
+        cpi CtrlZ               ; bail
+        jz prompt
+        jmp memin_intel_start
 memin_intel_1:
-	call uart_in_hex	; byte count
-	mov b, a
-	call uart_in_hex	; address high
-	mov h, a
-	call uart_in_hex	; address low
-	mov l, a
+        call uart_in_hex        ; byte count
+        mov b, a
+        call uart_in_hex        ; address high
+        mov h, a
+        call uart_in_hex        ; address low
+        mov l, a
 
-	mov a, b
-	add h
-	add l			; start of checksum
-	mov e, a
-	
-	push d
-	call uart_in_hex	; record type
-	pop d
-	cpi 0			; data
-	jz memin_intel_2
-	cpi 1			; eof
-	jz memin_intel_eof
-	jmp memin_intel		; not supported, wait for another record
+        mov a, b
+        add h
+        add l                   ; start of checksum
+        mov e, a
+
+        push d
+        call uart_in_hex        ; record type
+        pop d
+        cpi 0                   ; data
+        jz memin_intel_2
+        cpi 1                   ; eof
+        jz memin_intel_eof
+        jmp memin_intel ; not supported, wait for another record
 memin_intel_2:
-	mov a, b
-	ana a
-	jz memin_intel_cksum	; b=0, checksum comes next
-	push d			; e will get clobbered by input
-	call uart_in_hex
-	pop d
-	mov m, a		; save byte
-	add e			; add to checksum
-	mov e, a
-	inx h			; increment pointer
-	dcr b			; decrement counter
-	jmp memin_intel_2	; next byte
+        mov a, b
+        ana a
+        jz memin_intel_cksum    ; b=0, checksum comes next
+        push d                  ; e will get clobbered by input
+        call uart_in_hex
+        pop d
+        mov m, a                ; save byte
+        add e                   ; add to checksum
+        mov e, a
+        inx h                   ; increment pointer
+        dcr b                   ; decrement counter
+        jmp memin_intel_2       ; next byte
 memin_intel_cksum:
-	push d			; input clobbers e
-	call uart_in_hex	; get checksum
-	pop d
-	add e
-	jz memin_intel		; checksum is good, get next record
-	lxi h, ckerr_str
-	call uart_out_str	; show error on console
-	jmp memin_intel		; get next record
+        push d                  ; input clobbers e
+        call uart_in_hex        ; get checksum
+        pop d
+        add e
+        jz memin_intel          ; checksum is good, get next record
+        lxi h, ckerr_str
+        call uart_out_str       ; show error on console
+        jmp memin_intel         ; get next record
 memin_intel_eof:
-	call uart_in_hex	; checksum
-	jmp prompt		; done
+        call uart_in_hex        ; checksum
+        jmp prompt              ; done
 
 memout:
         lxi h, hextype_str      ; raw or intel?
@@ -290,7 +306,7 @@ memout_raw_1:
         inx h
         mvi b, 0
         push d
-	call uart_out_mempos
+        call uart_out_mempos
         mvi c, ' '
         call uart_out
 memout_raw_2:
@@ -306,6 +322,13 @@ memout_raw_2:
         jnz memout_raw_2        ; not yet
 
         call uart_out_crlf
+        in uart_ctl
+        ani uart_rx_rdy
+        jz memout_raw_3
+        in uart_data
+        cpi CtrlZ
+        jz prompt
+memout_raw_3:
         pop d
         dcx h
         mov a, h                ; see if we're at the end addr
@@ -319,80 +342,87 @@ memout_raw_2:
 memout_intel:
         call memout_prompt
         mov a, e
-        ana a           	; clear carry
+        ana a                   ; clear carry
         sub l
         mov e, a
         mov a, d
         sbb h
-        mov d, a		; de=de-hl
+        mov d, a                ; de=de-hl
 memout_intel_1:
-	mov a, d
-	ora a
-	jnz memout_intel_2	; d>0
-	mov a, e
-	cpi 020h
-	jnc memout_intel_2	; e>20h
-	mov b, e		; b=e
-	jmp memout_intel_3
+        mov a, d
+        ora a
+        jnz memout_intel_2      ; d>0
+        mov a, e
+        cpi 020h
+        jnc memout_intel_2      ; e>20h
+        mov b, e                ; b=e
+        jmp memout_intel_3
 memout_intel_2:
-	mvi b, 020h		; b=20h
+        mvi b, 020h             ; b=20h
 memout_intel_3:
-	ana a			; clear carry
-	mov a, e
-	sub b			; e=e-b
-	mov e, a
-	mov a, d
-	sbi 0			; d=d-(borrow)
-	mov d, a
-	push d
+        ana a                   ; clear carry
+        mov a, e
+        sub b                   ; e=e-b
+        mov e, a
+        mov a, d
+        sbi 0                   ; d=d-(borrow)
+        mov d, a
+        push d
 
-	mvi c, ':'
-	call uart_out		; start code
-	mov d, b
-	call uart_out_hex	; byte count
-	mov d, h
-	call uart_out_hex	; address high
-	mov d, l
-	call uart_out_hex	; address low
-	mvi d, 0
-	call uart_out_hex	; record type
+        mvi c, ':'
+        call uart_out           ; start code
+        mov d, b
+        call uart_out_hex       ; byte count
+        mov d, h
+        call uart_out_hex       ; address high
+        mov d, l
+        call uart_out_hex       ; address low
+        mvi d, 0
+        call uart_out_hex       ; record type
 
-	mov a, b		; checksum=b
-	add h
-	add l
-	mov e, a		; store checksum
+        mov a, b                ; checksum=b
+        add h
+        add l
+        mov e, a                ; store checksum
 memout_intel_4:
-	mov a, b
-	ana a
-	jz memout_intel_5	; end of line
-	mov d, m		; grab hex byte
-	mov a, e
-	add d
-	mov e, a		; checksum+=d
-	call uart_out_hex	; send to console
-	dcr b			; decrement byte counter
-	inx hl			; increment memory pointer
-	jmp memout_intel_4
+        mov a, b
+        ana a
+        jz memout_intel_5       ; end of line
+        mov d, m                ; grab hex byte
+        mov a, e
+        add d
+        mov e, a                ; checksum+=d
+        call uart_out_hex       ; send to console
+        dcr b                   ; decrement byte counter
+        inx hl                  ; increment memory pointer
+        jmp memout_intel_4
 memout_intel_5:
-	mov a, e
-	cma			; compliment checksum
-	inr a			; a++
-	mov d, a
-	call uart_out_hex	; checksum
-	call uart_out_crlf	; newline
+        mov a, e
+        cma                     ; compliment checksum
+        inr a                   ; a++
+        mov d, a
+        call uart_out_hex       ; checksum
+        call uart_out_crlf      ; newline
 
-	pop d
-	mov a, d
-	ana a			; d=0
-	jnz memout_intel_1	; next line
-	mov a, e
-	ana a			; e=0
-	jz memout_intel_6	; done
-	jmp memout_intel_1	; next line
+        in uart_ctl
+        ani uart_rx_rdy
+        jz memout_intel_6
+        in uart_data
+        cpi CtrlZ
+        jz prompt
 memout_intel_6:
-	lxi h, hexeof_str
-	call uart_out_str
-	jmp prompt
+        pop d
+        mov a, d
+        ana a                   ; d=0
+        jnz memout_intel_1      ; next line
+        mov a, e
+        ana a                   ; e=0
+        jz memout_intel_7       ; done
+        jmp memout_intel_1      ; next line
+memout_intel_7:
+        lxi h, hexeof_str
+        call uart_out_str
+        jmp prompt
 
 jump: ; jump to user-specified memory address
         lxi h, addr_str
@@ -405,67 +435,196 @@ jump: ; jump to user-specified memory address
         pchl                    ; jump!
 
 boot:
+	jmp prompt
+
+disk_setdrvfmt: ; select drive, set format
+	mvi c, zcmd_set_format
+        call zfdc_out
+        lxi h, drive_str        ; "drive:"
+        call uart_out_str
+        call uart_in_hex
+        mov c, a
+        call zfdc_out
+        lxi h, format_str       ; "format:"
+        call uart_out_str
+        call uart_in_hex
+        mov c, a
+        call zfdc_out
+        call zfdc_chkerr
+	ret
+
+disk_setsec:
+	mvi c, zcmd_set_side
+	call zfdc_out
+	lxi h, side_str
+	call uart_out_str	; "side:"
+	call uart_in_hex
+	mov c, a
+	call zfdc_out
+	call zfdc_chkerr
+
+	mvi c, zcmd_set_track
+	call zfdc_out
+	lxi h, track_str	; "track:"
+	call uart_out_str
+	call uart_in_hex
+	mov c, a
+	call zfdc_out
+	call zfdc_chkerr
+
+	mvi c, zcmd_set_sector
+	call zfdc_out
+	lxi h, sector_str	; "sector:"
+	call uart_out_str
+	call uart_in_hex
+	call zfdc_out
+	call zfdc_chkerr
+	ret
 
 diskread:
-        jmp prompt
+	call disk_setdrvfmt
+	call disk_setsec
+	mvi c, zcmd_get_sec_size
+	call zfdc_out
+	call zfdc_in		; number of 128 byte blocks
+	rlc			; *2
+	rlc			; *4 lines per block
+	mov d, a
+	lxi h, 0		; "address" counter
+diskread_1:
+	push d			; save line counter
+	mvi b, 20h		; output 20h bytes
+	mov a, b		; beginning of checksum
+	add h
+	add l
+	mov e, a		; save checksum
+	mvi c, ':'		; start code
+	call uart_out
+	mov d, b		; byte count
+	call uart_out_hex
+	mov d, h		; high address
+	call uart_out_hex
+	mov d, l		; low address
+	call uart_out_hex
+	mvi d, 0		; record type
+	call uart_out_hex
+diskread_2:
+	call zfdc_in		; get byte
+	mov d, a
+	call uart_out_hex	; send to uart
+	mov a, e
+	add d			; add to checksum
+	mov e, a
+	inx h			; increment pointer
+	dcr b			; decrement byte counter
+	jnz diskread_2		; next byte
+	cma			; complement checksum
+	inr a			; checksum++
+	mov d, a
+	call uart_out_hex	; send checksum
+	call uart_out_crlf	; new line
+	pop d
+	dcr d
+	jnz diskread_1		; more lines to follow
+	lxi h, hexeof_str	; EOF
+	call uart_out_str
+        jmp prompt		; done
+
 diskwrite:
         jmp prompt
 
-diskfmt:
-	mvi c, zcmd_set_format	; select drive, set format
+diskfmt: 
+	call disk_setdrvfmt
+        lxi h, start_str        ; "start:"
+        call uart_out_str
+        call uart_in_hex
+        mov h, a
+        push h                  ; save start track
+        lxi h, end_str
+        call uart_out_str       ; "end:"
+        call uart_in_hex
+        pop h
+        mov l, a                ; h=start trk, l=end trk
+        call uart_out_crlf
+
+	mvi c, zcmd_set_track	; set start track
 	call zfdc_out
-	lxi h, drive_str	; "drive:"
-	call uart_out_str
-	call uart_in_hex	
-	mov c, a
+	mov c, h
 	call zfdc_out
-	lxi h, format_str	; "format:"
-	call uart_out_str
-	call uart_in_hex
-	mov c, a
+	call zfdc_chkerr
+	mvi c, zcmd_seek_nv	; seek to start track
 	call zfdc_out
-	call zfdc_waitack
-	jz diskfmt_1		; no error
-	call zfdc_error
-        jmp prompt
-diskfmt_1: ; get start and end tracks
-	lxi h, start_str	; "start:"
-	call uart_out_str
-	call uart_in_hex
-	mov h, a
-	push h			; save start
-	lxi h, end_str
-	call uart_out_str	; "end:"
-	call uart_in_hex
-	pop h
-	mov l, a		; h=start trk, l=end trk
-	call uart_out_crlf
+	call zfdc_chkerr
 diskfmt_nexttrk: ; format a track
-	mvi c, zcmd_format_disk	; command
-	call zfdc_out
-	mov c, h		; track number
-	call uart_out
-	call zfdc_out
-	mvi c, zcmd_confirm_fmt	; go!
-	call zfdc_out
-	call uart_out_crlf
+        mvi c, zcmd_format_disk ; command
+        call zfdc_out
+        mov d, h                ; track number
+        call uart_out_hex
+        mov c, h
+        call zfdc_out
+        mvi c, zcmd_confirm_fmt ; go!
+        call zfdc_out
+        call uart_out_crlf
 diskfmt_wait: ; wait for track to be formatted
-	call zfdc_in		; will wait for data
-	cpi no_errors_flag
-	jz diskfmt_trkdone	; no error
-	call zfdc_error
-	jmp prompt		; bail
+        call zfdc_in            ; will wait for data
+        cpi no_errors_flag
+        jz diskfmt_trkdone      ; no error
+        call zfdc_error
+        jmp prompt              ; bail
 diskfmt_trkdone:
-	mov a, h
-	cmp l			; last track?
-	jz diskfmt_done
-	inr h
-	jmp diskfmt_nexttrk	; no, move to next track
+	mvi c, BS
+	call uart_out
+	call uart_out		; overwrite previous track number 
+        mov a, h
+        cmp l                   ; last track?
+        jz diskfmt_done
+        inr h
+        jmp diskfmt_nexttrk     ; no, move to next track
 diskfmt_done:
-	mvi c, zcmd_set_home
-	call zfdc_out
-	call zfdc_waitack
+        mvi c, zcmd_set_home
+        call zfdc_out
+        call zfdc_waitack
+        mvi c, zcmd_set_drive
+        call zfdc_out
+        mvi c, 3
+        call zfdc_out
+        call zfdc_waitack
+        jmp prompt
+
+portin: ; input from i/o port, display result
+;there is no "in r" instruction, so we'll have to put some code in memory
+	lxi h, port_str		; "port:"
+	call uart_out_str
+	lxi h, stack+1		; use the temp space just above the stack
+	mvi m, 0DBh		; "in"
+	inx h			; increment pointer
+	call uart_in_hex
+	mov m, a		; port number
+	call uart_out_crlf
+	inx h
+	mvi m, 0C9h		; "ret"
+	call stack+1		; call input instruction
+portin_1:
+	mov d, a
+	call uart_out_hex
 	jmp prompt
+
+portout: ; output specified value to i/o port
+	lxi h, port_str		; "port:"
+	call uart_out_str
+	call uart_in_hex
+	mov b, a
+	lxi h, byte_str		; "byte:"
+	call uart_out_str
+	call uart_in_hex
+	lxi h, stack+1
+	mvi m, 0D3h		; "out"
+	inx h			; increment pointer
+	mov m, b		; port number
+	inx h
+	mvi m, 0C9h		; "ret"
+	call stack+1
+	jmp prompt	
 
 ; hardware support routines
 uart_out_hex: ; send byte in d as ascii hex digits
@@ -504,8 +663,8 @@ uart_in_hex: ; get a byte from the console in ascii hex
 
 uart_in_hexnib: ; get a single hex digit from the console, return in a
         call uart_in            ; get digit from console
-	cpi CtrlZ		; ctrl-z?
-	jz prompt		; bail if so
+        cpi CtrlZ               ; ctrl-z?
+        jz prompt               ; bail if so
         cpi 061h                ; lowercase?
         jc hexnib1              ; nope
         sui 20h                 ; lower -> upper
@@ -554,13 +713,13 @@ uart_out_str: ; send string at hl to the console
         jmp uart_out_str        ; loop until we find a null
 
 uart_out_mempos: ; address in hl, plus a colon
-	mov d, h
-	call uart_out_hex
-	mov d, l
-	call uart_out_hex
-	mvi c, ':'
-	call uart_out
-	ret
+        mov d, h
+        call uart_out_hex
+        mov d, l
+        call uart_out_hex
+        mvi c, ':'
+        call uart_out
+        ret
 
 uart_out: ; send byte in c to the console
 ;        in uart_ctl             ; check uart status
@@ -611,6 +770,13 @@ zfdc_stat: ; is the zfdc trying to tell us something?
         dcr a
         ret                     ; return with a=ff if so
 
+zfdc_chkerr: ; wait for ack, check for error
+	call zfdc_waitack
+	ora a
+	rz			; just return if no error
+	call zfdc_error		; show zfdc error
+	jmp prompt		; return to prompt
+
 zfdc_waitack: ; block until the zfdc sends something (with timeout)
         push b
         lxi b, 0
@@ -637,16 +803,15 @@ zwait_2:
         ret
 
 zfdc_error:
-	mov d, a
-	lxi h, zfdc_error_str
-	call uart_out_str
-	call uart_out_hex
-	call uart_out_crlf
-	ret
+        mov d, a
+        lxi h, zfdc_error_str
+        call uart_out_str
+        call uart_out_hex
+        ret
 
 ; DATA STARTS HERE
 ; parameters
-drive_formats: db 01,01,01,01   ; zfdc format number for drives 0-3
+drive_formats: db 01,01,01,01   ; default format number for drives 0-3
 
 ; strings (null terminated)
 crlf_str: db CR,LF,0
@@ -659,5 +824,10 @@ end_str: db CR,LF,SPC," end:",0
 addr_str: db "addr:",0
 hexeof_str: db ":00000001FF",CR,LF,0
 ckerr_str: db " cksum err",0
-drive_str: db CR,LF,"drive:",0
+drive_str: db "drive:",0
+side_str: db CR,LF,"side:",0
+track_str: db CR,LF,"track:",0
+sector_str: db CR,LF,"sector:",0
 format_str: db CR,LF,"format:",0
+port_str: db "port:",0
+byte_str: db CR,LF,"byte:",0
