@@ -1,4 +1,4 @@
-tor for ZFDC and IMSAI SIO
+; 8080 Monitor for ZFDC and IMSAI SIO
 
 .hexfile zmon.hex
 .binfile zmon.bin
@@ -527,54 +527,47 @@ disk_setsec:
 	call zfdc_chkerr
 	ret
 
+disk_getsecsz: ; get current sector size (n*128)
+        mvi c, zcmd_get_sec_size
+        call zfdc_out
+        call zfdc_in            ; number of 128 byte blocks (-1)
+        inr a                   ; +1
+        mov b, a
+        call zfdc_waitack
+        lxi d, 0
+disk_getsecsz_1:
+        mov a, e
+        adi 080h                ; 128 bytes
+        mov e, a
+        mov a, d
+        aci 0                   ; add carry
+        mov d, a
+        dcr b
+        jnz disk_getsecsz_1     ; loop if not done
+        ret                     ; return with size (bytes) in de
+
 diskread:
 	call disk_setdrvfmt
-	call disk_setsec
-	mvi c, zcmd_get_sec_size
-	call zfdc_out
-	call zfdc_in		; number of 128 byte blocks
-	rlc			; *2
-	rlc			; *4 lines per block
-	mov d, a
-	lxi h, 0		; "address" counter
+        call disk_setsec
+        lxi h, start_str
+        call uart_out_str
+        call uart_in_hexaddr
+        call disk_getsecsz
+
+        mvi c, zcmd_read_sector
+        call zfdc_out
+        call zfdc_chkerr
 diskread_1:
-	push d			; save line counter
-	mvi b, 20h		; output 20h bytes
-	mov a, b		; beginning of checksum
-	add h
-	add l
-	mov e, a		; save checksum
-	mvi c, ':'		; start code
-	call uart_out
-	mov d, b		; byte count
-	call uart_out_hex
-	mov d, h		; high address
-	call uart_out_hex
-	mov d, l		; low address
-	call uart_out_hex
-	mvi d, 0		; record type
-	call uart_out_hex
-diskread_2:
-	call zfdc_in		; get byte
-	mov d, a
-	call uart_out_hex	; send to uart
-	mov a, e
-	add d			; add to checksum
-	mov e, a
-	inx h			; increment pointer
-	dcr b			; decrement byte counter
-	jnz diskread_2		; next byte
-	cma			; complement checksum
-	inr a			; checksum++
-	mov d, a
-	call uart_out_hex	; send checksum
-	call uart_out_crlf	; new line
-	pop d
-	dcr d
-	jnz diskread_1		; more lines to follow
-	lxi h, hexeof_str	; EOF
-	call uart_out_str
-        jmp prompt		; done
+        call zfdc_in            ; get byte from zfdc
+        mov m, a                ; store in memory
+        inx h
+        dcx d
+        mov a, e
+        ora d                   ; last byte?
+        jnz diskread_1          ; loop if not done
+
+        call zfdc_chkerr
+        jmp prompt              ; done
 
 diskwrite: ; write a sector to disk from memory
         call disk_setdrvfmt
