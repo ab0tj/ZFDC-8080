@@ -1,16 +1,19 @@
-
-; 8080 monitor for ZFDC and IMSAI SIO
+tor for ZFDC and IMSAI SIO
 
 .hexfile zmon.hex
 .binfile zmon.bin
 .download bin
-.org 0h ; 0 for testing, change to 0C000h before burning to rom
+
+; MODIFY THESE VALUES BEFORE BURNING TO ROM
+.org 0h ; 0 for testing, 0C000h for rom
+startmem		equ 0
+endmem			equ 0C000h
 
 stack   equ 0BFF0h ; stack pointer, just below rom and some temp space
 
 ; i/o ports
-uart_data               equ 01h         ; uart data port, emu=1 sio=2
-uart_ctl                equ 00h         ; uart control port, emu=0 sio=3
+uart_data               equ 02h         ; uart data port, emu=1 sio=2
+uart_ctl                equ 03h         ; uart control port, emu=0 sio=3
 uart_reset              equ 040h        ; reset byte
 uart_mode               equ 04Eh        ; mode byte
 uart_cmd_byte           equ 027h        ; control byte
@@ -53,11 +56,9 @@ CtrlZ equ 01Ah
 
 ; CODE STARTS HERE
 ;main program
-
         lxi sp, stack   ; initialize the stack pointer
 
 ; initialize hardware, show signon message
-
 ; init uart
         mvi a, 0              ; send dummy mode and command to uart
         out uart_ctl
@@ -72,7 +73,52 @@ CtrlZ equ 01Ah
 
         call uart_out_crlf      ; start on a fresh line
 
+; init memory	MODIFY THIS FOR ROM VERSION
+	lxi h, initmem_str
+	call uart_out_str	; show message
+
+	lxi h, end		; beginning of testable memory
+	lxi d, endmem		; end of testable memory
+
+initmem_loop_1:
+	mvi a, 0ffh
+	mov m, a	
+	cmp m			; is this what we stored?
+	jnz initmem_error	; that's not right
+	inx h			; next memory address
+	mov a, h
+	cmp d
+	jc initmem_loop_1
+	mov a, l
+	cmp e
+	jc initmem_loop_1	; not at end of memory?
+	lxi h, end		; we are; time for next pass
+
+initmem_loop_2:
+	xra a			; zero
+	mov m, a
+	cmp m			; is this what we stored?
+	jnz initmem_error	; no...
+	inx h			; next memory address
+	mov a, h
+	cmp d
+	jc initmem_loop_2
+	mov a, l
+	cmp e
+	jc initmem_loop_2	; not at end of memory?
+	jmp initzfdc		; we are. move on.
+
+initmem_error:
+	lxi h, initmem_error_str
+	call uart_out_str	; tell the user
+	mov d, h		; high byte
+	call uart_out_hex
+	mov d, l		; low byte
+	call uart_out_hex
+	call uart_out_crlf
+
 ; init zfdc
+initzfdc:
         out zfdc_reset_port     ; reset the zfdc board
 
         lxi b, 0
@@ -530,8 +576,28 @@ diskread_2:
 	call uart_out_str
         jmp prompt		; done
 
-diskwrite:
-        jmp prompt
+diskwrite: ; write a sector to disk from memory
+        call disk_setdrvfmt
+        call disk_setsec
+        lxi h, start_str
+        call uart_out_str
+        call uart_in_hexaddr
+        call disk_getsecsz
+diskwrite_0:
+        mvi c, zcmd_write_sector ; tell zfdc data is coming
+        call zfdc_out
+        call zfdc_waitack       ; wait for it to be ready
+diskwrite_1:
+        mov c, m                ; get byte from memory
+        call zfdc_out           ; send to zfdc
+        inx h
+        dcx d
+        mov a, e
+        ora d                   ; last byte?
+        jnz diskwrite_1         ; loop if not yet done
+
+        call zfdc_chkerr
+        jmp prompt              ; done!
 
 diskfmt: 
 	call disk_setdrvfmt
@@ -722,9 +788,9 @@ uart_out_mempos: ; address in hl, plus a colon
         ret
 
 uart_out: ; send byte in c to the console
-;        in uart_ctl             ; check uart status
-;        ani uart_tx_rdy
-;        jz uart_out             ; loop until we can send this byte
+        in uart_ctl             ; check uart status
+        ani uart_tx_rdy
+        jz uart_out             ; loop until we can send this byte
         mov a, c
         out uart_data           ; send the byte
         ret
@@ -815,6 +881,8 @@ drive_formats: db 01,01,01,01   ; default format number for drives 0-3
 
 ; strings (null terminated)
 crlf_str: db CR,LF,0
+initmem_str: db "Initializing memory...",CR,LF,0
+initmem_error_str: db "Memory error at ",0
 prompt_str: db CR,LF,'>',0
 zfdc_error_str: db CR,LF,"ZFDC error ",0
 signon_str: db "8080 ROM Monitor",CR,LF,0
@@ -831,3 +899,5 @@ sector_str: db CR,LF,"sector:",0
 format_str: db CR,LF,"format:",0
 port_str: db "port:",0
 byte_str: db CR,LF,"byte:",0
+
+end:
